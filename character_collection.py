@@ -1,14 +1,18 @@
 """
-Script that collects data on characters off the Raider.IO API and stores them int a csv.
+Script that collects data on characters off from the Raider.io API
+Data is stored on the MySQL localhost DB
 """
 
 
 # Import Libraries.
 import pandas as pd
-import urllib.request as url
 import time
+import requests
+from sqlalchemy import create_engine
+from pandas.io.json import json_normalize
 
 
+# DEPRECIATED DUE TO CHANGES IN load_char_info!
 # Function for finding the last page in the API. Needed so wrappers can access this information.
 def find_last_page():
     data = load_char_info(0)
@@ -21,14 +25,30 @@ def load_char_info(page):
     page_url = 'https://raider.io/api/mythic-plus/rankings/characters?region=us&season=season-7.3.2&' \
                'class=all&role=all&page={pg}'.format(pg=page)
 
-    req = url.Request(page_url, headers={'User-Agent': "Magic Browser"})
-    info = url.urlopen(req)
-    data = pd.read_json(info, orient='columns')
-    return data
+    r = requests.get(page_url)
+    parsed_r  = r.json()
+    result = json_normalize(parsed_r['rankings']['rankedCharacters'], errors='ignore')
+
+    # Cannot store lists into MySQL so we convert the runs column into a list
+    result['runs']  = result['runs'].astype('str')
+    return result
+
+
+def upload_data_to_db(df, table):
+    engine = create_engine('mysql+mysqlconnector://agent15:bot@localhost/raider_io')
+    connection = engine.connect()
+
+    # Use a temp table to handle duplicates
+    df.to_sql(name='temp_table', con=engine, if_exists='replace', index=False)
+
+    # Insert into primary table while ignoring duplicates
+    connection = engine.connect()
+    connection.execute("INSERT IGNORE INTO {tbl} SELECT * FROM temp_table".format(tbl=table))
+    connection.close()
+    return
 
 
 def collect_data(current_page, last_page):
-    page = 0  # If no current page is given, start at 0.
     for page in range(current_page, last_page + 1):
 
         # Load a page of data and initialize/reset the DF holding the data.
@@ -36,19 +56,8 @@ def collect_data(current_page, last_page):
         time.sleep(0.25)
         try:
             data = load_char_info(page)
-        except url.HTTPError:
+            print("Loaded character page %s at %s." % (page, time.ctime()))
+            upload_data_to_db(data, 'character_info')
+        except:
             break
-        print("Loaded character page %s." % page)
-
-        # Append to DF one page of data.
-        char_info = pd.DataFrame(columns=["ID", "Score"])
-        num_characters = len(data['rankings']['rankedCharacters'])
-        for character in range(num_characters):
-            char_id = data['rankings']['rankedCharacters'][character]['character']['id']
-            score = data['rankings']['rankedCharacters'][character]['score']
-            char_info.loc[character] = [char_id, score]
-
-        # Write a page of character data to the csv.
-        char_info.to_csv('data\\char_info.csv', header=None, index=False, mode="a")
-
     return page
